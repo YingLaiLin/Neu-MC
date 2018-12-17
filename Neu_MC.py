@@ -55,7 +55,52 @@ def init_weights(shape, name=None):
     return K.variable(projection)
 
 
-# def get_nn_model(num_genes, num_diseases):
+def get_nn_model(num_genes, num_diseases, mc_dim):
+    # Input variables
+    gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
+    disease_input = Input(shape=(1,), dtype='int32', name='disease_input')
+
+    # using gene feature matrix for initialization
+    gene_feas = h5py.File('gene_features.mat', 'r')
+    humannet_features = gene_feas['features'][:,:].T
+    gene_feature_size = humannet_features.shape
+    assert gene_feature_size[0] + 1 == num_genes
+
+    humannet_features = np.insert(humannet_features, 0, [0]*gene_feature_size[1], 0)
+    humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False)
+    humannet_embedding_layer.build((None,))
+    humannet_embedding_layer.set_weights([humannet_features])
+    
+    # using disease feature matrix for initializationmerge
+    feas = h5py.File('disease_features.mat','r')
+    omim_features = feas['col_features'][:,:].T
+    disease_feature_size = omim_features.shape
+    assert disease_feature_size[0] + 1 == num_diseases
+    
+    omim_features = np.insert(omim_features, 0, [0]*disease_feature_size[1], 0)
+    omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False)
+    omim_embedding_layer.build((None,))
+    omim_embedding_layer.set_weights([omim_features])
+    
+    # get specific features
+    gene_feature = Flatten(name='')(humannet_embedding_layer(gene_input))
+    disease_feature = Flatten()(omim_embedding_layer(disease_input))
+    # disease_feature = K.transpose(disease_feature)
+    # projection matrix, using W * H' as initialization
+    
+    # projection of gene feature and disease feature
+    
+    projected_gene_feature = Dense(mc_dim,trainable=True, name='gene_projection', activation='relu', kernel_initializer='he_init')(gene_feature)
+    
+    projected_disease_feature = Dense(mc_dim,trainable=True, name='disease_projection', activation='relu', kernel_initializer='he_init')(disease_feature)
+    score = dot([projected_gene_feature, projected_disease_feature], False, name='inner_product')
+    # calculate score
+    # score = merge([gene_feature, project_disease], mode='mul', name='score')
+    
+    # prediction = Dense(1, activation='sigmoid', init='he_uniform', name='prediction')(score)
+
+
+    model = Model(inputs=[gene_input, disease_input], outputs=score)
     
 
 
@@ -95,7 +140,7 @@ def get_model(num_genes, num_diseases):
     
     project_disease = Dense(gene_feature_size[1],trainable=True, name='disease_gene_projection', activation='relu', kernel_initializer=init_weights)(disease_feature)
     
-    score = dot([gene_feature, project_disease], 1, name='inner_product')
+    score = dot([gene_feature, project_disease], False, name='inner_product')
     # calculate score
     # score = merge([gene_feature, project_disease], mode='mul', name='score')
     
@@ -162,6 +207,8 @@ def label_dependent_loss(alpha):
 
 def root_mean_squared_error(y_true, y_pred):
     return K.sqrt(K.mean(K.square(y_pred - y_true), axis=-1))
+
+
 if __name__ == '__main__':
     
     args = parse_args()
