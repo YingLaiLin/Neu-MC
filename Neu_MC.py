@@ -4,7 +4,7 @@ from keras import backend as K
 import numpy as np
 import h5py
 from keras.models import Model
-from keras.layers import Embedding, Input, Dense, Activation
+from keras.layers import Embedding, Input, Dense, Activation, dot
 from keras.layers import Embedding, Input, Dense, merge, Reshape, Merge, Flatten, Dropout,BatchNormalization
 from keras.optimizers import Adagrad, Adam, SGD, RMSprop
 import argparse
@@ -20,7 +20,7 @@ def parse_args():
                         help='Input data path.')
     parser.add_argument('--dataset', nargs='?', default='gene',
                         help='Choose a dataset.')
-    parser.add_argument('--epochs', type=int, default=50,
+    parser.add_argument('--epochs', type=int, default=1,
                         help='Number of epochs.')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size.')
@@ -32,7 +32,7 @@ def parse_args():
                         help='Regularization for MF embeddings.')                    
     parser.add_argument('--reg_layers', nargs='?', default='[0.01]',
                         help="Regularization for each MLP layer. reg_layers[0] is the regularization for embeddings.")
-    parser.add_argument('--num_neg', type=int, default=10,
+    parser.add_argument('--num_neg', type=int, default=5,
                         help='Number of negative instances to pair with a positive instance.')
     parser.add_argument('--lr', type=float, default=0.001,
                         help='Learning rate.')
@@ -70,30 +70,34 @@ def get_model(num_genes, num_diseases):
     humannet_embedding_layer.build((None,))
     humannet_embedding_layer.set_weights([humannet_features])
     
-    # using disease feature matrix for initialization
+    # using disease feature matrix for initializationmerge
     feas = h5py.File('disease_features.mat','r')
     omim_features = feas['col_features'][:,:].T
     disease_feature_size = omim_features.shape
     assert disease_feature_size[0] + 1 == num_diseases
-
+    
     omim_features = np.insert(omim_features, 0, [0]*disease_feature_size[1], 0)
     omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=True)
     omim_embedding_layer.build((None,))
     omim_embedding_layer.set_weights([omim_features])
     
     # get specific features
-    gene_feature = Flatten()(humannet_embedding_layer(gene_input))
+    gene_feature = Flatten(name='')(humannet_embedding_layer(gene_input))
     disease_feature = Flatten()(omim_embedding_layer(disease_input))
     # disease_feature = K.transpose(disease_feature)
     # projection matrix, using W * H' as initialization
     
     
-    project_disease = Dense(gene_feature_size[1],trainable=True, name='disease_gene_projection', activation='relu', init=init_weights)(disease_feature)
+    project_disease = Dense(gene_feature_size[1],trainable=True, name='disease_gene_projection', activation='linear', kernel_initializer=init_weights)(disease_feature)
     
+    score = dot([gene_feature, project_disease], 1, name='inner_product')
     # calculate score
-    score = merge([gene_feature, project_disease], mode='mul')
-    prediction = Dense(1, activation='sigmoid', init='he_uniform', name='prediction')(score)
-    model = Model(input=[gene_input, disease_input], output=prediction)
+    # score = merge([gene_feature, project_disease], mode='mul', name='score')
+    
+    # prediction = Dense(1, activation='sigmoid', init='he_uniform', name='prediction')(score)
+
+
+    model = Model(inputs=[gene_input, disease_input], outputs=score)
 
     return model
 def get_train_instances(train, num_negatives):
@@ -118,10 +122,14 @@ def eval_NeuCF(model):
     print('constructing ScoreMatrix...')
     score_matrix = np.zeros((num_users, num_items), dtype='float')
     items = [i for i in range(num_items)]
+    users = np.full(len(items), 1, dtype = 'int32')
+    dot_out_model = Model(inputs=model.input, \
+                outputs=model.get_layer('inner_product').output)
+    dot  = dot_out_model.predict([users, np.array(items)], batch_size=12332,verbose=0)
     for user_ind in range(1, num_users):
         users = np.full(len(items), user_ind, dtype = 'int32')
         score_from_u = model.predict([users, np.array(items)], 
-                                batch_size=100, verbose=0)
+                                batch_size=12332, verbose=0)
         score_matrix[user_ind,:] = np.reshape(np.array(score_from_u), -1)
 
     # delte row 0 and column 0
@@ -138,6 +146,11 @@ def eval_NeuCF(model):
     recall = engine.eval_for_NeuCF(metric_recall, topR)
     return cdf, recall
 
+def label_dependent_loss(alpha):
+    def label_dependent(y_true, y_pred):
+        return alpha * K.sum(y_true * K.square(y_pred - y_true)) + \
+                (1-alpha) * K.sum((1 - y_true ) * K.square(y_pred))
+    return label_dependent
 
 if __name__ == '__main__':
     
@@ -166,10 +179,9 @@ if __name__ == '__main__':
     
     # Build model
     model = get_model(num_users, num_items)
-    loss_func = 'binary_crossentropy'
+    # loss_func = 'binary_crossentropy'
     
-    # loss_func = 'mse'
-
+    loss_func = label_dependent_loss(alpha=0.8)   
     if learner.lower() == "adagrad": 
         model.compile(optimizer=Adagrad(lr=learning_rate), loss=loss_func)
     elif learner.lower() == "rmsprop":
@@ -203,6 +215,7 @@ if __name__ == '__main__':
     best_hr, best_ndcg, best_iter = hr, ndcg, -1
     # Training model
     
+    model.summary()
     for epoch in xrange(num_epochs):
         t1 = time()
         # Generate training instances
@@ -213,6 +226,7 @@ if __name__ == '__main__':
                          np.array(labels), # labels 
                          batch_size=batch_size, nb_epoch=1, verbose=1, shuffle=True)
 
+        
         t2 = time()
        
         # Evaluation
