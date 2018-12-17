@@ -13,6 +13,7 @@ from Dataset import Dataset
 import matlab.engine
 from time import time
 from evaluate import evaluate_model
+import pandas as pd
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run NeuMF.")
@@ -20,7 +21,7 @@ def parse_args():
                         help='Input data path.')
     parser.add_argument('--dataset', nargs='?', default='gene',
                         help='Choose a dataset.')
-    parser.add_argument('--epochs', type=int, default=1,
+    parser.add_argument('--epochs', type=int, default=10,
                         help='Number of epochs.')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size.')
@@ -52,6 +53,10 @@ def init_weights(shape, name=None):
     feas = h5py.File('projection.mat','r')
     projection = feas['proj'][:,:]
     return K.variable(projection)
+
+
+# def get_nn_model(num_genes, num_diseases):
+    
 
 
 def get_model(num_genes, num_diseases):
@@ -88,7 +93,7 @@ def get_model(num_genes, num_diseases):
     # projection matrix, using W * H' as initialization
     
     
-    project_disease = Dense(gene_feature_size[1],trainable=True, name='disease_gene_projection', activation='linear', kernel_initializer=init_weights)(disease_feature)
+    project_disease = Dense(gene_feature_size[1],trainable=True, name='disease_gene_projection', activation='relu', kernel_initializer=init_weights)(disease_feature)
     
     score = dot([gene_feature, project_disease], 1, name='inner_product')
     # calculate score
@@ -102,7 +107,7 @@ def get_model(num_genes, num_diseases):
     return model
 def get_train_instances(train, num_negatives):
     user_input, item_input, labels = [],[],[]
-    num_users = train.shape[0]
+    
     for (u, i) in train.keys():
         # positive instance
         user_input.append(u)
@@ -116,7 +121,10 @@ def get_train_instances(train, num_negatives):
             user_input.append(u)
             item_input.append(j)
             labels.append(0)
-    return user_input, item_input, labels
+    df = pd.DataFrame({'user':user_input, 'item':item_input, 
+     'label':labels})
+    df = df.sample(frac=1, random_state=501)
+    return df['user'], df['item'], df['label']
 def eval_NeuCF(model):
     print('start evaluating NeuCF...')
     print('constructing ScoreMatrix...')
@@ -152,6 +160,8 @@ def label_dependent_loss(alpha):
                 (1-alpha) * K.sum((1 - y_true ) * K.square(y_pred))
     return label_dependent
 
+def root_mean_squared_error(y_true, y_pred):
+    return K.sqrt(K.mean(K.square(y_pred - y_true), axis=-1))
 if __name__ == '__main__':
     
     args = parse_args()
@@ -180,8 +190,8 @@ if __name__ == '__main__':
     # Build model
     model = get_model(num_users, num_items)
     # loss_func = 'binary_crossentropy'
-    
-    loss_func = label_dependent_loss(alpha=0.8)   
+    loss_func = label_dependent_loss(alpha=1-5e-3)   
+    loss_func = root_mean_squared_error
     if learner.lower() == "adagrad": 
         model.compile(optimizer=Adagrad(lr=learning_rate), loss=loss_func)
     elif learner.lower() == "rmsprop":
