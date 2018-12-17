@@ -14,6 +14,7 @@ import matlab.engine
 from time import time
 from evaluate import evaluate_model
 import pandas as pd
+import os
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run NeuMF.")
@@ -71,7 +72,7 @@ def get_nn_model(num_genes, num_diseases, mc_dim):
     humannet_embedding_layer.build((None,))
     humannet_embedding_layer.set_weights([humannet_features])
     
-    # using disease feature matrix for initializationmerge
+    # using disease feature matrix for initialization
     feas = h5py.File('disease_features.mat','r')
     omim_features = feas['col_features'][:,:].T
     disease_feature_size = omim_features.shape
@@ -93,7 +94,7 @@ def get_nn_model(num_genes, num_diseases, mc_dim):
     projected_gene_feature = Dense(mc_dim,trainable=True, name='gene_projection', activation='relu', kernel_initializer='he_init')(gene_feature)
     
     projected_disease_feature = Dense(mc_dim,trainable=True, name='disease_projection', activation='relu', kernel_initializer='he_init')(disease_feature)
-    score = dot([projected_gene_feature, projected_disease_feature], False, name='inner_product')
+    score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
     # calculate score
     # score = merge([gene_feature, project_disease], mode='mul', name='score')
     
@@ -140,7 +141,7 @@ def get_model(num_genes, num_diseases):
     
     project_disease = Dense(gene_feature_size[1],trainable=True, name='disease_gene_projection', activation='relu', kernel_initializer=init_weights)(disease_feature)
     
-    score = dot([gene_feature, project_disease], False, name='inner_product')
+    score = dot([gene_feature, project_disease], 1, name='inner_product')
     # calculate score
     # score = merge([gene_feature, project_disease], mode='mul', name='score')
     
@@ -176,9 +177,6 @@ def eval_NeuCF(model):
     score_matrix = np.zeros((num_users, num_items), dtype='float')
     items = [i for i in range(num_items)]
     users = np.full(len(items), 1, dtype = 'int32')
-    dot_out_model = Model(inputs=model.input, \
-                outputs=model.get_layer('inner_product').output)
-    dot  = dot_out_model.predict([users, np.array(items)], batch_size=12332,verbose=0)
     for user_ind in range(1, num_users):
         users = np.full(len(items), user_ind, dtype = 'int32')
         score_from_u = model.predict([users, np.array(items)], 
@@ -238,7 +236,7 @@ if __name__ == '__main__':
     model = get_model(num_users, num_items)
     # loss_func = 'binary_crossentropy'
     loss_func = label_dependent_loss(alpha=1-5e-3)   
-    loss_func = root_mean_squared_error
+    # loss_func = root_mean_squared_error
     if learner.lower() == "adagrad": 
         model.compile(optimizer=Adagrad(lr=learning_rate), loss=loss_func)
     elif learner.lower() == "rmsprop":
@@ -259,7 +257,8 @@ if __name__ == '__main__':
         
     # Init performance
     engine = matlab.engine.start_matlab()
-    engine.cd('~/program/neural_collaborative_filtering', nargout=0)
+    cur_path = os.getcwd()
+    engine.cd(cur_path, nargout=0)
     cdf, recall = eval_NeuCF(model)
     cdf_t, recall_t = cdf[0][99], recall[0][99]
     print('Init: cdf = %.6f, recall = %.6f' % ( cdf_t, recall_t,))
