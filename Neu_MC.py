@@ -1,6 +1,7 @@
 import tensorflow as tf
 import keras
 from keras import backend as K
+from keras import regularizers
 import numpy as np
 import h5py
 from keras.models import Model
@@ -22,32 +23,32 @@ def parse_args():
                         help='Input data path.')
     parser.add_argument('--dataset', nargs='?', default='gene',
                         help='Choose a dataset.')
-    parser.add_argument('--epochs', type=int, default=10,
+    parser.add_argument('--epochs', type=int, default=100,
                         help='Number of epochs.')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size.')
-    parser.add_argument('--num_factors', type=int, default=8,
-                        help='Embedding size of MF model.')
-    parser.add_argument('--layers', nargs='?', default='[64]',
-                        help="MLP layers. Note that the first layer is the concatenation of user and item embeddings. So layers[0]/2 is the embedding size.")
-    parser.add_argument('--reg_mf', type=float, default=0.01,
-                        help='Regularization for MF embeddings.')                    
-    parser.add_argument('--reg_layers', nargs='?', default='[0.01]',
-                        help="Regularization for each MLP layer. reg_layers[0] is the regularization for embeddings.")
-    parser.add_argument('--num_neg', type=int, default=5,
+    parser.add_argument('--proj_dim', type=int, default=200,
+                        help='Projection size of gene and disease.')
+    parser.add_argument('--r', type=int, default=100,
+                        help='specify Top K for evaluation.')                
+    parser.add_argument('--alpha', type=float, default=1e-3,
+                        help='weight of unlabled observatons in loss function')
+    parser.add_argument('--reg_gene', type=float, default=0.01,
+                        help='Regularization for gene projection.')                    
+    parser.add_argument('--reg_disease', type=float, default=0.01,
+                        help='Regularization for disease projection.')                        
+    parser.add_argument('--num_neg', type=int, default=10,
                         help='Number of negative instances to pair with a positive instance.')
-    parser.add_argument('--lr', type=float, default=0.001,
+    parser.add_argument('--lr', type=float, default=0.01,
                         help='Learning rate.')
     parser.add_argument('--learner', nargs='?', default='adam',
                         help='Specify an optimizer: adagrad, adam, rmsprop, sgd')
-    parser.add_argument('--verbose', type=int, default=1,
+    parser.add_argument('--verbose', type=int, default=5,
                         help='Show performance per X iterations')
     parser.add_argument('--out', type=int, default=1,
                         help='Whether to save the trained model.')
-    parser.add_argument('--mf_pretrain', nargs='?', default='',
-                        help='Specify the pretrain model file for MF part. If empty, no pretrain will be used')
-    parser.add_argument('--mlp_pretrain', nargs='?', default='',
-                        help='Specify the pretrain model file for MLP part. If empty, no pretrain will be used')
+    parser.add_argument('--pretrain', nargs='?', default='',
+                        help='Specify the pretrain model file for this model.')
     return parser.parse_args()
 
 def init_weights(shape, name=None):
@@ -56,7 +57,7 @@ def init_weights(shape, name=None):
     return K.variable(projection)
 
 
-def get_nn_model(num_genes, num_diseases, mc_dim):
+def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # Input variables
     gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
     disease_input = Input(shape=(1,), dtype='int32', name='disease_input')
@@ -84,16 +85,22 @@ def get_nn_model(num_genes, num_diseases, mc_dim):
     omim_embedding_layer.set_weights([omim_features])
     
     # get specific features
-    gene_feature = Flatten(name='')(humannet_embedding_layer(gene_input))
+    gene_feature = Flatten()(humannet_embedding_layer(gene_input))
     disease_feature = Flatten()(omim_embedding_layer(disease_input))
     # disease_feature = K.transpose(disease_feature)
     # projection matrix, using W * H' as initialization
     
     # projection of gene feature and disease feature
     
-    projected_gene_feature = Dense(mc_dim,trainable=True, name='gene_projection', activation='relu', kernel_initializer='he_init')(gene_feature)
+    projected_gene_feature = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l1(reg_gene), name='gene_projection',
+                activation='sigmoid', kernel_initializer='he_normal')(gene_feature)
     
-    projected_disease_feature = Dense(mc_dim,trainable=True, name='disease_projection', activation='relu', kernel_initializer='he_init')(disease_feature)
+    projected_disease_feature = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l1(reg_disease),name='disease_projection',
+                activation='sigmoid', kernel_initializer='he_normal')(disease_feature)
+
+    # calculate inner product as score
     score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
     # calculate score
     # score = merge([gene_feature, project_disease], mode='mul', name='score')
@@ -102,7 +109,7 @@ def get_nn_model(num_genes, num_diseases, mc_dim):
 
 
     model = Model(inputs=[gene_input, disease_input], outputs=score)
-    
+    return model
 
 
 def get_model(num_genes, num_diseases):
@@ -171,7 +178,7 @@ def get_train_instances(train, num_negatives):
      'label':labels})
     df = df.sample(frac=1, random_state=501)
     return df['user'], df['item'], df['label']
-def eval_NeuCF(model):
+def eval_NeuCF(model, topK):
     print('start evaluating NeuCF...')
     print('constructing ScoreMatrix...')
     score_matrix = np.zeros((num_users, num_items), dtype='float')
@@ -187,7 +194,7 @@ def eval_NeuCF(model):
     sio.savemat('NeuCF_ScoreMatrix.mat',{'ScoreMatrix':score_matrix[1:,1:]}) 
     print('constructed finished')
     print('starting evaluating cdf and recall for NeuCF...')
-    topR = matlab.double([100])
+    topR = matlab.double([topK])
     metric_cdf = matlab.double([1])
     metric_recall = matlab.double([0])
     # change directory to locate .m
@@ -202,9 +209,9 @@ def label_dependent_loss(alpha):
         return alpha * K.sum(y_true * K.square(y_pred - y_true)) + \
                 (1-alpha) * K.sum((1 - y_true ) * K.square(y_pred))
     return label_dependent
-
+# TODO root_mean_squared lead to nan
 def root_mean_squared_error(y_true, y_pred):
-    return K.sqrt(K.mean(K.square(y_pred - y_true), axis=-1))
+    return K.sqrt(K.mean(K.square(y_pred - y_true)))
 
 
 if __name__ == '__main__':
@@ -212,20 +219,18 @@ if __name__ == '__main__':
     args = parse_args()
     num_epochs = args.epochs
     batch_size = args.batch_size
-    mf_dim = args.num_factors
-    layers = eval(args.layers)
-    reg_mf = args.reg_mf
-    reg_layers = eval(args.reg_layers)
+    proj_dim = args.proj_dim
+    reg_gene = args.reg_gene
+    reg_disease = args.reg_disease
     num_negatives = args.num_neg
+    topK = args.r
+    alpha = args.alpha
     learning_rate = args.lr
     learner = args.learner
     verbose = args.verbose
-    mf_pretrain = args.mf_pretrain
-    mlp_pretrain = args.mlp_pretrain
-
-    topK = 100
+    model_pretrain = args.pretrain
+    
     evaluation_threads = 1#mp.cpu_count()
-    model_out_file = 'Pretrain/NeuMC.h5'
         
     # Loading data
     dataset = Dataset(args.path + args.dataset)
@@ -233,10 +238,12 @@ if __name__ == '__main__':
     num_users, num_items = dataset.num_users, dataset.num_items
     
     # Build model
-    model = get_model(num_users, num_items)
+    # model = get_model(num_users, num_items)
+    model = get_nn_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
     # loss_func = 'binary_crossentropy'
-    loss_func = label_dependent_loss(alpha=1-5e-3)   
+    loss_func = label_dependent_loss(alpha=alpha)
     # loss_func = root_mean_squared_error
+    
     if learner.lower() == "adagrad": 
         model.compile(optimizer=Adagrad(lr=learning_rate), loss=loss_func)
     elif learner.lower() == "rmsprop":
@@ -247,7 +254,8 @@ if __name__ == '__main__':
         model.compile(optimizer=SGD(lr=learning_rate), loss=loss_func)
     
     # load pretrain model
-    
+    if model_pretrain != '':
+        model.load_weights(model_pretrain)
     # neumf_pretrain = 'Pretrain/gene_NeuMF_8_[64]_0.050.h5'
     # model.load_weights(neumf_pretrain,by_name=True)
 
@@ -259,8 +267,8 @@ if __name__ == '__main__':
     engine = matlab.engine.start_matlab()
     cur_path = os.getcwd()
     engine.cd(cur_path, nargout=0)
-    cdf, recall = eval_NeuCF(model)
-    cdf_t, recall_t = cdf[0][99], recall[0][99]
+    cdf, recall = eval_NeuCF(model, topK)
+    cdf_t, recall_t = cdf[0][topK-1], recall[0][topK-1]
     print('Init: cdf = %.6f, recall = %.6f' % ( cdf_t, recall_t,))
     
     best_cdf, best_recall, best_iter = cdf_t,recall_t,-1
@@ -286,30 +294,31 @@ if __name__ == '__main__':
         t2 = time()
        
         # Evaluation
-        if epoch % 4 == 0:
-            cdf, recall = eval_NeuCF(model)
-            cdf_t, recall_t, loss = cdf[0][99], recall[0][99], hist.history['loss'][0]
+        if epoch % verbose == 0:
+            cdf, recall = eval_NeuCF(model, topK)
+            cdf_t, recall_t, loss = cdf[0][topK-1], recall[0][topK-1], hist.history['loss'][0]
             print('Iteration %d [%.1f s]: cdf = %.6f, recall = %.6f, loss = %.8f [%.1f s]' 
                   % (epoch,  t2-t1, cdf_t, recall_t, loss, time()-t2))
             if cdf_t > best_cdf:
-                best_cdf, best_recall, best_iter = cdf[0][99], recall[0][99],           epoch
-                if args.out > 0:
-                    model_out_file = 'Pretrain/%s_NeuMF_%d_%s_%.3f.h5' %(args.dataset, mf_dim, args.layers, best_cdf)
-                    model.save_weights(model_out_file, overwrite=True)
+                best_cdf, best_recall, best_iter = cdf[0][topK-1], recall[0][topK-1],epoch
+        if epoch % 50 == 0:
+            if args.out > 0:
+                model_out_file = 'Pretrain/%s_NeuMF_%d_%.4f_%.4f.h5' %(args.dataset, proj_dim, alpha, best_cdf)
+                model.save_weights(model_out_file, overwrite=True)
+                print("The best NeuMF model is saved to %s" %(model_out_file))
 
-        if epoch % 2 == 0:
+        if epoch % verbose == 0:
             (hits, ndcgs) = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
             hr, ndcg, loss = np.array(hits).mean(), np.array(ndcgs).mean(), hist.history['loss'][0]
             print('Iteration %d [%.1f s]: HR = %.4f, NDCG = %.4f, loss = %.6f [%.1f s]' 
                   % (epoch,  t2-t1, hr, ndcg, loss, time()-t2))
             if hr > best_hr or ndcg > best_ndcg:
                 best_hr, best_ndcg, best_iter = hr, ndcg, epoch
-                # if args.out > 0:
-                #     model.save_weights(model_out_file, overwrite=True)
-    
-    # engine.quit()
 
-    # cal ScoreMatrix 
+
+    engine.quit()
+
+    # cal ScoreMatrix and save
     score_matrix = np.zeros((num_users, num_items), dtype='float')
     items = [i for i in range(num_items)]
     for user_ind in range(1, num_users):
@@ -323,11 +332,11 @@ if __name__ == '__main__':
     score_matrix = np.delete(score_matrix,[0], axis=1)
     sio.savemat('NeuCF_ScoreMatrix.mat',{'ScoreMatrix':score_matrix}) 
     
-    # print("End. Best Iteration %d:  cdf = %.4f, recall = %.4f. " %(best_iter, best_cdf, best_recall))      
     print("End. Best Iteration %d:  HR = %.4f, NDCG = %.4f. " %(best_iter, best_hr, best_ndcg))      
     print("End. Best Iteration %d:  CDF = %.4f, Recall = %.4f. " %(best_iter, best_cdf, best_recall))      
 
-    # print("End. Best Iteration %d:  HR = %.4f, NDCG = %.4f. " %(best_iter, best_hr, best_ndcg))
+
     if args.out > 0:
-        model_out_file = 'Pretrain/%s_NeuMF_%d_%s_%.3f.h5' %(args.dataset, mf_dim, args.layers, best_cdf)
+        model_out_file = 'Pretrain/%s_NeuMF_%d_%.4f_%.4f.h5' %(args.dataset, proj_dim, alpha, best_cdf)
+        model.save_weights(model_out_file, overwrite=True)
         print("The best NeuMF model is saved to %s" %(model_out_file))
