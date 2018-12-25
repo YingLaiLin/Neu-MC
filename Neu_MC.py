@@ -27,17 +27,17 @@ def parse_args():
                         help='Number of epochs.')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size.')
-    parser.add_argument('--proj_dim', type=int, default=200,
+    parser.add_argument('--proj_dim', type=int, default=100,
                         help='Projection size of gene and disease.')
     parser.add_argument('--r', type=int, default=100,
                         help='specify Top K for evaluation.')                
-    parser.add_argument('--alpha', type=float, default=1e-3,
+    parser.add_argument('--alpha', type=float, default=1-1e-2,
                         help='weight of unlabled observatons in loss function')
     parser.add_argument('--reg_gene', type=float, default=0.01,
                         help='Regularization for gene projection.')                    
     parser.add_argument('--reg_disease', type=float, default=0.01,
                         help='Regularization for disease projection.')                        
-    parser.add_argument('--num_neg', type=int, default=10,
+    parser.add_argument('--num_neg', type=int, default=5,
                         help='Number of negative instances to pair with a positive instance.')
     parser.add_argument('--lr', type=float, default=0.01,
                         help='Learning rate.')
@@ -92,13 +92,15 @@ def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     
     # projection of gene feature and disease feature
     
+    
+
     projected_gene_feature = Dense(proj_dim,trainable=True, 
                 kernel_regularizer=regularizers.l1(reg_gene), name='gene_projection',
-                activation='sigmoid', kernel_initializer='he_normal')(gene_feature)
+                activation='relu', kernel_initializer='he_normal')(gene_feature)
     
     projected_disease_feature = Dense(proj_dim,trainable=True, 
                 kernel_regularizer=regularizers.l1(reg_disease),name='disease_projection',
-                activation='sigmoid', kernel_initializer='he_normal')(disease_feature)
+                activation='relu', kernel_initializer='he_normal')(disease_feature)
 
     # calculate inner product as score
     score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
@@ -176,7 +178,7 @@ def get_train_instances(train, num_negatives):
             labels.append(0)
     df = pd.DataFrame({'user':user_input, 'item':item_input, 
      'label':labels})
-    df = df.sample(frac=1, random_state=501)
+    # df = df.sample(frac=1, random_state=501)
     return df['user'], df['item'], df['label']
 def eval_NeuCF(model, topK):
     print('start evaluating NeuCF...')
@@ -209,6 +211,7 @@ def label_dependent_loss(alpha):
         return alpha * K.sum(y_true * K.square(y_pred - y_true)) + \
                 (1-alpha) * K.sum((1 - y_true ) * K.square(y_pred))
     return label_dependent
+
 # TODO root_mean_squared lead to nan
 def root_mean_squared_error(y_true, y_pred):
     return K.sqrt(K.mean(K.square(y_pred - y_true)))
@@ -303,7 +306,7 @@ if __name__ == '__main__':
                 best_cdf, best_recall, best_iter = cdf[0][topK-1], recall[0][topK-1],epoch
         if epoch % 50 == 0:
             if args.out > 0:
-                model_out_file = 'Pretrain/%s_NeuMF_%d_%.4f_%.4f.h5' %(args.dataset, proj_dim, alpha, best_cdf)
+                model_out_file = 'Pretrain/%s_NeuMC_%d_%.4f_%.4f.h5' %(args.dataset, proj_dim, alpha, best_cdf)
                 model.save_weights(model_out_file, overwrite=True)
                 print("The best NeuMF model is saved to %s" %(model_out_file))
 
@@ -337,6 +340,6 @@ if __name__ == '__main__':
 
 
     if args.out > 0:
-        model_out_file = 'Pretrain/%s_NeuMF_%d_%.4f_%.4f.h5' %(args.dataset, proj_dim, alpha, best_cdf)
+        model_out_file = 'Pretrain/%s_NeuMC_%d_%.4f_%.4f.h5' %(args.dataset, proj_dim, alpha, best_cdf)
         model.save_weights(model_out_file, overwrite=True)
         print("The best NeuMF model is saved to %s" %(model_out_file))
