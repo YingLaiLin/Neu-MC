@@ -23,27 +23,29 @@ def parse_args():
                         help='Input data path.')
     parser.add_argument('--dataset', nargs='?', default='gene',
                         help='Choose a dataset.')
-    parser.add_argument('--epochs', type=int, default=1000,
+    parser.add_argument('--epochs', type=int, default=100,
                         help='Number of epochs.')
-    parser.add_argument('--batch_size', type=int, default=256,
+    parser.add_argument('--batch_size', type=int, default=1024,
                         help='Batch size.')
-    parser.add_argument('--proj_dim', type=int, default=100,
+    parser.add_argument('--proj_dim', type=int, default=500,
                         help='Projection size of gene and disease.')
     parser.add_argument('--r', type=int, default=100,
                         help='specify Top K for evaluation.')                
-    parser.add_argument('--alpha', type=float, default=1-5e-2,
+    parser.add_argument('--alpha', type=float, default=0.8,
                         help='weight of unlabled observatons in loss function')
-    parser.add_argument('--reg_gene', type=float, default=0.0,
+    parser.add_argument('--reg_gene', type=float, default=1e-4,
                         help='Regularization for gene projection.')                    
-    parser.add_argument('--reg_disease', type=float, default=0.0,
+    parser.add_argument('--reg_disease', type=float, default=1e-4,
                         help='Regularization for disease projection.')                        
-    parser.add_argument('--num_neg', type=int, default=5,
+    parser.add_argument('--num_neg', type=int, default=10,
                         help='Number of negative instances to pair with a positive instance.')
-    parser.add_argument('--lr', type=float, default=0.001,
+    parser.add_argument('--lr', type=float, default=0.01,
                         help='Learning rate.')
+    parser.add_argument('--decay', type=float, default=2e-3,
+                        help='Decay rate for learning rate.')
     parser.add_argument('--learner', nargs='?', default='adam',
                         help='Specify an optimizer: adagrad, adam, rmsprop, sgd')
-    parser.add_argument('--verbose', type=int, default=5,
+    parser.add_argument('--verbose', type=int, default=50,
                         help='Show performance per X iterations')
     parser.add_argument('--out', type=int, default=1,
                         help='Whether to save the trained model.')
@@ -229,6 +231,7 @@ if __name__ == '__main__':
     topK = args.r
     alpha = args.alpha
     learning_rate = args.lr
+    decay = args.decay
     learner = args.learner
     verbose = args.verbose
     model_pretrain = args.pretrain
@@ -252,7 +255,7 @@ if __name__ == '__main__':
     elif learner.lower() == "rmsprop":
         model.compile(optimizer=RMSprop(lr=learning_rate), loss=loss_func)
     elif learner.lower() == "adam":
-        model.compile(optimizer=Adam(lr=learning_rate), loss=loss_func)
+        model.compile(optimizer=Adam(lr=learning_rate,decay=decay), loss=loss_func)
     else:
         model.compile(optimizer=SGD(lr=learning_rate), loss=loss_func)
     
@@ -283,7 +286,7 @@ if __name__ == '__main__':
     # Training model
     
     model.summary()
-    for epoch in xrange(1,num_epochs):
+    for epoch in xrange(1,num_epochs+1):
         t1 = time()
         # Generate training instances
         user_input, item_input, labels = get_train_instances(train, num_negatives)
@@ -304,12 +307,12 @@ if __name__ == '__main__':
                   % (epoch,  t2-t1, cdf_t, recall_t, loss, time()-t2))
             if cdf_t > best_cdf:
                 best_cdf, best_recall, best_iter = cdf[0][topK-1], recall[0][topK-1],epoch
-        if epoch % 900 == 0:
+        if epoch % 450 == 0:
             if args.out > 0:
-                model_out_file = 'Pretrain/%s_NeuMC_%d_%.4f_%.4f-%d.h5' %(args.dataset, proj_dim, alpha, best_cdf, time())
+                model_out_file = 'Model/%s_NeuMC_%d_%.4f_%.4f-%d.h5' %(args.dataset, proj_dim, alpha, best_cdf, time())
                 model.save(model_out_file);
                 #model.save_weights(model_out_file, overwrite=True)
-                print("The best NeuMF model is saved to %s" %(model_out_file))
+                print("The best NeuMC model is saved to %s" %(model_out_file))
 
         if epoch % verbose == 0:
             (hits, ndcgs) = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)

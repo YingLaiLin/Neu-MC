@@ -2,4 +2,6 @@
 /Data
 *.mat
 # configuration
- ./vscode
+./vscode
+# logs
+nimc*
