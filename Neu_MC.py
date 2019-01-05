@@ -16,14 +16,16 @@ from time import time
 from evaluate import evaluate_model
 import pandas as pd
 import os
+import pygpu
+from keras.constraints import UnitNorm
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run NeuMF.")
     parser.add_argument('--path', nargs='?', default='Data/',
-                        help='Input data path.')
+            help='Input data path.')
     parser.add_argument('--dataset', nargs='?', default='gene',
                         help='Choose a dataset.')
-    parser.add_argument('--epochs', type=int, default=100,
+    parser.add_argument('--epochs', type=int, default=200,
                         help='Number of epochs.')
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='Batch size.')
@@ -31,20 +33,22 @@ def parse_args():
                         help='Projection size of gene and disease.')
     parser.add_argument('--r', type=int, default=100,
                         help='specify Top K for evaluation.')                
-    parser.add_argument('--alpha', type=float, default=0.8,
+    parser.add_argument('--alpha', type=float, default=0.6,
                         help='weight of unlabled observatons in loss function')
-    parser.add_argument('--reg_gene', type=float, default=1e-4,
+    parser.add_argument('--reg_gene', type=float, default=5e-4,
                         help='Regularization for gene projection.')                    
-    parser.add_argument('--reg_disease', type=float, default=1e-4,
+    parser.add_argument('--reg_disease', type=float, default=5e-4,
                         help='Regularization for disease projection.')                        
     parser.add_argument('--num_neg', type=int, default=10,
                         help='Number of negative instances to pair with a positive instance.')
     parser.add_argument('--lr', type=float, default=0.01,
                         help='Learning rate.')
-    parser.add_argument('--decay', type=float, default=2e-3,
+    parser.add_argument('--decay', type=float, default=4e-3,
                         help='Decay rate for learning rate.')
     parser.add_argument('--learner', nargs='?', default='adam',
                         help='Specify an optimizer: adagrad, adam, rmsprop, sgd')
+    parser.add_argument('--drop', type=float, default=0.1,
+                        help='Drop rate for dropout.')
     parser.add_argument('--verbose', type=int, default=50,
                         help='Show performance per X iterations')
     parser.add_argument('--out', type=int, default=1,
@@ -92,19 +96,21 @@ def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # disease_feature = K.transpose(disease_feature)
     # projection matrix, using W * H' as initialization
     
-    # projection of gene feature and disease feature
-    
-    
-
+    # projection of gene features 
     projected_gene_feature = Dense(proj_dim,trainable=True, 
-                kernel_regularizer=regularizers.l1(reg_gene), name='gene_projection',
-                activation='relu', kernel_initializer='he_normal')(gene_feature)
-    
-    projected_disease_feature = Dense(proj_dim,trainable=True, 
-                kernel_regularizer=regularizers.l1(reg_disease),name='disease_projection',
-                activation='relu', kernel_initializer='he_normal')(disease_feature)
+                kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection               ',activation='relu', kernel_initializer='he_normal')(gene_feature)
+   # batch_gene_feature = BatchNormalization(name='Batch_gene')(projected_gene_feature)
+    #dropout_gene_feature = Dropout(rate=0.1, name='dropout_gene_feature',seed=501)(batch_gene_feature)
 
+    # projection of disease features
+    projected_disease_feature = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l2(reg_disease),name='disease_proje                ction',activation='relu', kernel_initializer='he_normal')(disease_feature)
+
+    #batch_disease_feature = BatchNormalization(name='Batch_disease')(projected_disease_feature)
+    #dropout_disease_feature = Dropout(rate=0.1, name='dropout_disease_feature',seed=501)(batch_disease_feature)
     # calculate inner product as score
+    #score = dot([dropout_gene_feature, dropout_disease_feature], 1, name='inner_product')
+    # calculate score
     score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
     # calculate score
     # score = merge([gene_feature, project_disease], mode='mul', name='score')
@@ -214,6 +220,18 @@ def label_dependent_loss(alpha):
                 (1-alpha) * K.sum((1 - y_true ) * K.square(y_pred))
     return label_dependent
 
+def squared_loss(alpha):
+    def label_dependent(y_true, y_pred):
+        return K.sum(y_true * K.square(y_pred - y_true)) + \
+                (1-alpha) * K.sum((1 - y_true ) * K.square(y_pred))
+    return label_dependent
+    
+    
+def l21_reg(weight_matrix):
+    return 5e-4 * K.sum(K.sqrt(K.sum(K.square(weight_matrix), axis=1)))
+    
+
+
 # TODO root_mean_squared lead to nan
 def root_mean_squared_error(y_true, y_pred):
     return K.sqrt(K.mean(K.square(y_pred - y_true)))
@@ -232,6 +250,7 @@ if __name__ == '__main__':
     alpha = args.alpha
     learning_rate = args.lr
     decay = args.decay
+    drop = args.drop
     learner = args.learner
     verbose = args.verbose
     model_pretrain = args.pretrain
@@ -247,6 +266,7 @@ if __name__ == '__main__':
     # model = get_model(num_users, num_items)
     model = get_nn_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
     # loss_func = 'binary_crossentropy'
+    #loss_func = squared_loss(alpha-alpha)
     loss_func = label_dependent_loss(alpha=alpha)
     # loss_func = root_mean_squared_error
     
@@ -294,7 +314,7 @@ if __name__ == '__main__':
         # Training
         hist = model.fit([np.array(user_input), np.array(item_input)], #input
                          np.array(labels), # labels 
-                         batch_size=batch_size, nb_epoch=1, verbose=1, shuffle=True)
+                         batch_size=batch_size, epochs=2, verbose=1, shuffle=True)
 
         
         t2 = time()
@@ -307,12 +327,6 @@ if __name__ == '__main__':
                   % (epoch,  t2-t1, cdf_t, recall_t, loss, time()-t2))
             if cdf_t > best_cdf:
                 best_cdf, best_recall, best_iter = cdf[0][topK-1], recall[0][topK-1],epoch
-        if epoch % 450 == 0:
-            if args.out > 0:
-                model_out_file = 'Model/%s_NeuMC_%d_%.4f_%.4f-%d.h5' %(args.dataset, proj_dim, alpha, best_cdf, time())
-                model.save(model_out_file);
-                #model.save_weights(model_out_file, overwrite=True)
-                print("The best NeuMC model is saved to %s" %(model_out_file))
 
         if epoch % verbose == 0:
             (hits, ndcgs) = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
@@ -344,6 +358,6 @@ if __name__ == '__main__':
 
 
     if args.out > 0:
-        model_out_file = 'Pretrain/%s_NeuMC_%d_%.4f_%.4f-%d.h5' %(args.dataset, proj_dim, alpha, best_cdf,time())
+        model_out_file = 'Pretrain/%s-NeuMC-cdf%.4f-dim%d-alpha%.4f-batch%d-%d.h5' %(args.dataset, best_cdf, proj_dim, alpha, batch_size,time())
         model.save_weights(model_out_file, overwrite=True)
         print("The best NeuMC model is saved to %s" %(model_out_file))
