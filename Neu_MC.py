@@ -99,8 +99,6 @@ def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # projection of gene features 
     projected_gene_feature = Dense(proj_dim,trainable=True, 
                 kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection               ',activation='relu', kernel_initializer='he_normal')(gene_feature)
-   # batch_gene_feature = BatchNormalization(name='Batch_gene')(projected_gene_feature)
-    #dropout_gene_feature = Dropout(rate=0.1, name='dropout_gene_feature',seed=501)(batch_gene_feature)
 
     # projection of disease features
     projected_disease_feature = Dense(proj_dim,trainable=True, 
