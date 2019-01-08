@@ -2,10 +2,11 @@ import tensorflow as tf
 import keras
 from keras import backend as K
 from keras import regularizers
+from keras import layers
 import numpy as np
 import h5py
 from keras.models import Model
-from keras.layers import Embedding, Input, Dense, Activation, dot
+from keras.layers import Embedding, Input, Dense, Activation, dot, Layer
 from keras.layers import Embedding, Input, Dense, merge, Reshape, Merge, Flatten, Dropout,BatchNormalization
 from keras.optimizers import Adagrad, Adam, SGD, RMSprop
 import argparse
@@ -16,6 +17,7 @@ from time import time
 from evaluate import evaluate_model
 import pandas as pd
 import os
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run NeuMF.")
@@ -58,6 +60,14 @@ def init_weights(shape, name=None):
     projection = feas['proj'][:,:]
     return K.variable(projection)
 
+def residual_block(x, reg, proj_dim, bottle_neck_dim):
+    y = Dense(bottle_neck_dim,trainable=True, 
+                kernel_regularizer=regularizers.l1(reg),
+                activation='relu', kernel_initializer='he_normal')(x)
+    z = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l1(reg),
+                activation='relu', kernel_initializer='he_normal')(y)
+    return layers.add([x, z])
 
 def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # Input variables
@@ -95,17 +105,21 @@ def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # projection of gene feature and disease feature
     
     
-
+    
     projected_gene_feature = Dense(proj_dim,trainable=True, 
                 kernel_regularizer=regularizers.l1(reg_gene), name='gene_projection',
                 activation='relu', kernel_initializer='he_normal')(gene_feature)
+    residual_gene_feature = residual_block(projected_gene_feature, reg_gene, proj_dim, proj_dim/2) 
     
     projected_disease_feature = Dense(proj_dim,trainable=True, 
                 kernel_regularizer=regularizers.l1(reg_disease),name='disease_projection',
-                activation='relu', kernel_initializer='he_normal')(disease_feature)
-
+                activation='relu', kernel_initializer='he_normal')(disease_feature)               
+    residual_disease_feature = residual_block(projected_disease_feature, reg_disease, proj_dim, proj_dim/2)
+    
+    
     # calculate inner product as score
-    score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
+    score = dot([residual_gene_feature,residual_disease_feature], 1, name='inner_product')
+    # score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
     # calculate score
     # score = merge([gene_feature, project_disease], mode='mul', name='score')
     
