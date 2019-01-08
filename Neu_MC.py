@@ -25,7 +25,7 @@ def parse_args():
                         help='Input data path.')
     parser.add_argument('--dataset', nargs='?', default='gene',
                         help='Choose a dataset.')
-    parser.add_argument('--epochs', type=int, default=100,
+    parser.add_argument('--epochs', type=int, default=200,
                         help='Number of epochs.')
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='Batch size.')
@@ -33,11 +33,11 @@ def parse_args():
                         help='Projection size of gene and disease.')
     parser.add_argument('--r', type=int, default=100,
                         help='specify Top K for evaluation.')                
-    parser.add_argument('--alpha', type=float, default=0.8,
+    parser.add_argument('--alpha', type=float, default=0.6,
                         help='weight of unlabled observatons in loss function')
-    parser.add_argument('--reg_gene', type=float, default=1e-4,
+    parser.add_argument('--reg_gene', type=float, default=5e-4,
                         help='Regularization for gene projection.')                    
-    parser.add_argument('--reg_disease', type=float, default=1e-4,
+    parser.add_argument('--reg_disease', type=float, default=5e-4,
                         help='Regularization for disease projection.')                        
     parser.add_argument('--num_neg', type=int, default=10,
                         help='Number of negative instances to pair with a positive instance.')
