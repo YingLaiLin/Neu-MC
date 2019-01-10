@@ -2,10 +2,11 @@ import tensorflow as tf
 import keras
 from keras import backend as K
 from keras import regularizers
+from keras import layers
 import numpy as np
 import h5py
 from keras.models import Model
-from keras.layers import Embedding, Input, Dense, Activation, dot
+from keras.layers import Embedding, Input, Dense, Activation, dot, Layer
 from keras.layers import Embedding, Input, Dense, merge, Reshape, Merge, Flatten, Dropout,BatchNormalization
 from keras.optimizers import Adagrad, Adam, SGD, RMSprop
 import argparse
@@ -18,6 +19,7 @@ import pandas as pd
 import os
 import pygpu
 from keras.constraints import UnitNorm
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run NeuMF.")
@@ -43,7 +45,7 @@ def parse_args():
                         help='Number of negative instances to pair with a positive instance.')
     parser.add_argument('--lr', type=float, default=0.01,
                         help='Learning rate.')
-    parser.add_argument('--decay', type=float, default=4e-3,
+    parser.add_argument('--decay', type=float, default=6e-3,
                         help='Decay rate for learning rate.')
     parser.add_argument('--learner', nargs='?', default='adam',
                         help='Specify an optimizer: adagrad, adam, rmsprop, sgd')
@@ -62,8 +64,14 @@ def init_weights(shape, name=None):
     projection = feas['proj'][:,:]
     return K.variable(projection)
 
+def residual_block(x, reg, proj_dim, bottle_neck_dim):
+    y = Dense(proj_dim,trainable=True, 
+                activation='relu', kernel_initializer='he_normal')(x)
+    #z = Dense(proj_dim,trainable=True, 
+    #            activation='relu', kernel_initializer='he_normal')(y)
+    return layers.add([x, y])
 
-def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
+def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # Input variables
     gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
     disease_input = Input(shape=(1,), dtype='int32', name='disease_input')
@@ -75,10 +83,10 @@ def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     assert gene_feature_size[0] + 1 == num_genes
 
     humannet_features = np.insert(humannet_features, 0, [0]*gene_feature_size[1], 0)
-    humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False)
-    humannet_embedding_layer.build((None,))
-    humannet_embedding_layer.set_weights([humannet_features])
-    
+    #humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False)
+    #humannet_embedding_layer.build((None,))
+    #humannet_embedding_layer.set_weights([humannet_features])
+    humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False, weights=[humannet_features])
     # using disease feature matrix for initialization
     feas = h5py.File('disease_features.mat','r')
     omim_features = feas['col_features'][:,:].T
@@ -86,32 +94,35 @@ def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     assert disease_feature_size[0] + 1 == num_diseases
     
     omim_features = np.insert(omim_features, 0, [0]*disease_feature_size[1], 0)
-    omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False)
-    omim_embedding_layer.build((None,))
-    omim_embedding_layer.set_weights([omim_features])
-    
+    #omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False)
+    #omim_embedding_layer.build((None,))
+    #omim_embedding_layer.set_weights([omim_features])
+    omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False,weights=[omim_features])
     # get specific features
     gene_feature = Flatten()(humannet_embedding_layer(gene_input))
     disease_feature = Flatten()(omim_embedding_layer(disease_input))
     # disease_feature = K.transpose(disease_feature)
     # projection matrix, using W * H' as initialization
     
-    # projection of gene features 
+
+    # projection of gene feature and disease feature
+    
+    
+    
     projected_gene_feature = Dense(proj_dim,trainable=True, 
-                kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection               ',activation='relu', kernel_initializer='he_normal')(gene_feature)
+                kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection',
+                activation='relu', kernel_initializer='he_normal')(gene_feature)
 
-    # projection of disease features
+    #compact_gene_feature = residual_block(residual_gene_feature, reg_gene, proj_dim, proj_dim/4)
+    
     projected_disease_feature = Dense(proj_dim,trainable=True, 
-                kernel_regularizer=regularizers.l2(reg_disease),name='disease_proje                ction',activation='relu', kernel_initializer='he_normal')(disease_feature)
-
-    #batch_disease_feature = BatchNormalization(name='Batch_disease')(projected_disease_feature)
-    #dropout_disease_feature = Dropout(rate=0.1, name='dropout_disease_feature',seed=501)(batch_disease_feature)
-    # calculate inner product as score
-    #score = dot([dropout_gene_feature, dropout_disease_feature], 1, name='inner_product')
+                kernel_regularizer=regularizers.l2(reg_disease),name='disease_projection',
+                activation='relu', kernel_initializer='he_normal')(disease_feature)             
+    
+    #compact_disease_feature = residual_block(residual_disease_feature,reg_disease, proj_dim, proj_dim/4)
+    score = dot([projected_gene_feature,projected_disease_feature], 1, name='inner_product')
+    # score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
     # calculate score
-    score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
-    # calculate score
-    # score = merge([gene_feature, project_disease], mode='mul', name='score')
     
     # prediction = Dense(1, activation='sigmoid', init='he_uniform', name='prediction')(score)
 
@@ -119,6 +130,76 @@ def get_nn_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     model = Model(inputs=[gene_input, disease_input], outputs=score)
     return model
 
+def get_deepimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
+    # Input variables
+    gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
+    disease_input = Input(shape=(1,), dtype='int32', name='disease_input')
+
+    # using gene feature matrix for initialization
+    gene_feas = h5py.File('gene_features.mat', 'r')
+    humannet_features = gene_feas['features'][:,:].T
+    gene_feature_size = humannet_features.shape
+    assert gene_feature_size[0] + 1 == num_genes
+
+    humannet_features = np.insert(humannet_features, 0, [0]*gene_feature_size[1], 0)
+    #humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False)
+    #humannet_embedding_layer.build((None,))
+    #humannet_embedding_layer.set_weights([humannet_features])
+    humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False, weights=[humannet_features])
+    # using disease feature matrix for initialization
+    feas = h5py.File('disease_features.mat','r')
+    omim_features = feas['col_features'][:,:].T
+    disease_feature_size = omim_features.shape
+    assert disease_feature_size[0] + 1 == num_diseases
+    
+    omim_features = np.insert(omim_features, 0, [0]*disease_feature_size[1], 0)
+    #omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False)
+    #omim_embedding_layer.build((None,))
+    #omim_embedding_layer.set_weights([omim_features])
+    omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False,weights=[omim_features])
+    # get specific features
+    gene_feature = Flatten()(humannet_embedding_layer(gene_input))
+    disease_feature = Flatten()(omim_embedding_layer(disease_input))
+    # disease_feature = K.transpose(disease_feature)
+    # projection matrix, using W * H' as initialization
+    
+
+    # projection of gene feature and disease feature
+    
+    
+    
+    projected_gene_feature = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection',
+                activation='relu', kernel_initializer='he_normal')(gene_feature)
+    residual_gene_feature = residual_block(projected_gene_feature, reg_gene, proj_dim, proj_dim/2) 
+
+    #compact_gene_feature = residual_block(residual_gene_feature, reg_gene, proj_dim, proj_dim/4)
+    
+    projected_disease_feature = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l2(reg_disease),name='disease_projection',
+                activation='relu', kernel_initializer='he_normal')(disease_feature)             
+    
+    residual_disease_feature = residual_block(projected_disease_feature, reg_disease, proj_dim, proj_dim/2)
+    #compact_disease_feature = residual_block(residual_disease_feature,reg_disease, proj_dim, proj_dim/4)
+    score = dot([residual_gene_feature,residual_disease_feature], 1, name='inner_product')
+    # score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
+    # calculate score
+    
+    # prediction = Dense(1, activation='sigmoid', init='he_uniform', name='prediction')(score)
+
+
+    model = Model(inputs=[gene_input, disease_input], outputs=score)
+    return model
+
+
+def get_model(num_genes, num_diseases):
+    # Input variables
+    gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
+    disease_input = Input(shape=(1,), dtype='int32', name='disease_input')
+
+    # using gene feature matrix for initialization
+    gene_feas = h5py.File('gene_features.mat', 'r')
+    humannet_features = gene_feas['features'][:,:].T
 
 def get_model(num_genes, num_diseases):
     # Input variables
@@ -278,6 +359,7 @@ if __name__ == '__main__':
         model.compile(optimizer=SGD(lr=learning_rate), loss=loss_func)
     
     # load pretrain model
+    model_pretrain = 'Pretrain/gene-NeuMC-cdf0.2964-dim500-alpha0.6000-batch1024.h5'
     if model_pretrain != '':
         model.load_weights(model_pretrain)
     # neumf_pretrain = 'Pretrain/gene_NeuMF_8_[64]_0.050.h5'
@@ -356,6 +438,6 @@ if __name__ == '__main__':
 
 
     if args.out > 0:
-        model_out_file = 'Pretrain/%s-NeuMC-cdf%.4f-dim%d-alpha%.4f-batch%d-%d.h5' %(args.dataset, best_cdf, proj_dim, alpha, batch_size,time())
+        model_out_file = 'Pretrain/%s-NeuMC-cdf%.4f-dim%d-alpha%.4f-batch%d.h5' %(args.dataset, best_cdf, proj_dim, alpha, batch_size)
         model.save_weights(model_out_file, overwrite=True)
         print("The best NeuMC model is saved to %s" %(model_out_file))
