@@ -55,6 +55,8 @@ def parse_args():
                         help='Show performance per X iterations')
     parser.add_argument('--out', type=int, default=1,
                         help='Whether to save the trained model.')
+    parser.add_argument('--model', nargs='?', default='nimc', 
+                        help='Specify the model to use: nimc, deepimc')
     parser.add_argument('--pretrain', nargs='?', default='',
                         help='Specify the pretrain model file for this model.')
     return parser.parse_args()
@@ -65,11 +67,11 @@ def init_weights(shape, name=None):
     return K.variable(projection)
 
 def residual_block(x, reg, proj_dim, bottle_neck_dim):
-    y = Dense(proj_dim,trainable=True, 
-                activation='relu', kernel_initializer='he_normal')(x)
-    #z = Dense(proj_dim,trainable=True, 
-    #            activation='relu', kernel_initializer='he_normal')(y)
-    return layers.add([x, y])
+    y = Dense(proj_dim,trainable=True, kernel_regularizer=regularizers.l2(5e-4),
+            activation='relu', kernel_initializer='he_normal')(x)
+    z = Dense(proj_dim,trainable=True, kernel_regularizer=regularizers.l2(5e-4),
+            activation='relu', kernel_initializer='he_normal')(y)
+    return layers.add([x, z])
 
 def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # Input variables
@@ -168,14 +170,14 @@ def get_deepimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     
     
     
-    projected_gene_feature = Dense(proj_dim,trainable=True, 
+    projected_gene_feature = Dense(proj_dim,trainable=False, 
                 kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection',
                 activation='relu', kernel_initializer='he_normal')(gene_feature)
     residual_gene_feature = residual_block(projected_gene_feature, reg_gene, proj_dim, proj_dim/2) 
 
     #compact_gene_feature = residual_block(residual_gene_feature, reg_gene, proj_dim, proj_dim/4)
     
-    projected_disease_feature = Dense(proj_dim,trainable=True, 
+    projected_disease_feature = Dense(proj_dim,trainable=False, 
                 kernel_regularizer=regularizers.l2(reg_disease),name='disease_projection',
                 activation='relu', kernel_initializer='he_normal')(disease_feature)             
     
@@ -333,7 +335,7 @@ if __name__ == '__main__':
     learner = args.learner
     verbose = args.verbose
     model_pretrain = args.pretrain
-    
+    training_model = args.model 
     evaluation_threads = 1#mp.cpu_count()
         
     # Loading data
@@ -343,12 +345,18 @@ if __name__ == '__main__':
     
     # Build model
     # model = get_model(num_users, num_items)
-    model = get_nn_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
-    # loss_func = 'binary_crossentropy'
     #loss_func = squared_loss(alpha-alpha)
     loss_func = label_dependent_loss(alpha=alpha)
     # loss_func = root_mean_squared_error
     
+    
+    # specify model
+    if training_model.lower() == 'deepimc':
+        model = get_deepimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
+    else:
+        model = get_nimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease);
+
+    # specify learner 
     if learner.lower() == "adagrad": 
         model.compile(optimizer=Adagrad(lr=learning_rate), loss=loss_func)
     elif learner.lower() == "rmsprop":
@@ -357,11 +365,9 @@ if __name__ == '__main__':
         model.compile(optimizer=Adam(lr=learning_rate,decay=decay), loss=loss_func)
     else:
         model.compile(optimizer=SGD(lr=learning_rate), loss=loss_func)
-    
     # load pretrain model
-    model_pretrain = 'Pretrain/gene-NeuMC-cdf0.2964-dim500-alpha0.6000-batch1024.h5'
     if model_pretrain != '':
-        model.load_weights(model_pretrain)
+        model.load_weights(model_pretrain,by_name=True)
     # neumf_pretrain = 'Pretrain/gene_NeuMF_8_[64]_0.050.h5'
     # model.load_weights(neumf_pretrain,by_name=True)
 
@@ -379,12 +385,7 @@ if __name__ == '__main__':
     
     best_cdf, best_recall, best_iter = cdf_t,recall_t,-1
 
-    (hits, ndcgs) = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
-    hr, ndcg = np.array(hits).mean(), np.array(ndcgs).mean()
-    print('Init: HR = %.4f, NDCG = %.4f' %(hr, ndcg))
-    best_hr, best_ndcg, best_iter = hr, ndcg, -1
     # Training model
-    
     model.summary()
     for epoch in xrange(1,num_epochs+1):
         t1 = time()
@@ -408,13 +409,6 @@ if __name__ == '__main__':
             if cdf_t > best_cdf:
                 best_cdf, best_recall, best_iter = cdf[0][topK-1], recall[0][topK-1],epoch
 
-        if epoch % verbose == 0:
-            (hits, ndcgs) = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
-            hr, ndcg, loss = np.array(hits).mean(), np.array(ndcgs).mean(), hist.history['loss'][0]
-            print('Iteration %d [%.1f s]: HR = %.4f, NDCG = %.4f, loss = %.6f [%.1f s]' 
-                  % (epoch,  t2-t1, hr, ndcg, loss, time()-t2))
-            if hr > best_hr or ndcg > best_ndcg:
-                best_hr, best_ndcg, best_iter = hr, ndcg, epoch
 
 
     engine.quit()
@@ -433,7 +427,6 @@ if __name__ == '__main__':
     score_matrix = np.delete(score_matrix,[0], axis=1)
     sio.savemat('NeuCF_ScoreMatrix.mat',{'ScoreMatrix':score_matrix}) 
     
-    print("End. Best Iteration %d:  HR = %.4f, NDCG = %.4f. " %(best_iter, best_hr, best_ndcg))      
     print("End. Best Iteration %d:  CDF = %.4f, Recall = %.4f. " %(best_iter, best_cdf, best_recall))      
 
 
