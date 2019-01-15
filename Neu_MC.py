@@ -7,7 +7,7 @@ import numpy as np
 import h5py
 from keras.models import Model
 from keras.layers import Embedding, Input, Dense, Activation, dot, Layer
-from keras.layers import Embedding, Input, Dense, merge, Reshape, Merge, Flatten, Dropout,BatchNormalization
+from keras.layers import Embedding, Input, Dense, merge, Reshape, Merge, Flatten, Dropout,BatchNormalization, Add, multiply
 from keras.optimizers import Adagrad, Adam, SGD, RMSprop
 import argparse
 import scipy.io as sio
@@ -68,9 +68,9 @@ def init_weights(shape, name=None):
 
 def residual_block(x, reg, proj_dim, bottle_neck_dim):
     y = Dense(proj_dim,trainable=True, kernel_regularizer=regularizers.l2(5e-4),
-            activation='relu', kernel_initializer='he_normal')(x)
+            activation='relu', kernel_initializer='random_normal')(x)
     z = Dense(proj_dim,trainable=True, kernel_regularizer=regularizers.l2(5e-4),
-            activation='relu', kernel_initializer='he_normal')(y)
+            activation='relu', kernel_initializer='random_normal')(y)
     return layers.add([x, z])
 
 def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
@@ -167,24 +167,34 @@ def get_deepimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     
 
     # projection of gene feature and disease feature
+    gene_latent_factors = Embedding(input_dim=gene_feature_size[0]+1,
+            output_dim=500, trainable=True, embeddings_initializer='he_normal', embeddings_regularizer=regularizers.l2(1e-2))
+
     
+    disease_latent_factors = Embedding(input_dim=disease_feature_size[0]+1,
+            output_dim=500, trainable=True, embeddings_initializer='he_normal', embeddings_regularizer=regularizers.l2(1e-2))
     
-    
-    projected_gene_feature = Dense(proj_dim,trainable=False, 
+    # get specific latent factor
+    gene_factor = Flatten()(gene_latent_factors(gene_input))
+    disease_factor = Flatten()(disease_latent_factors(disease_input))
+
+    projected_gene_feature = Dense(proj_dim,trainable=True, 
                 kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection',
                 activation='relu', kernel_initializer='he_normal')(gene_feature)
-    residual_gene_feature = residual_block(projected_gene_feature, reg_gene, proj_dim, proj_dim/2) 
+#    residual_gene_feature = residual_block(projected_gene_feature, reg_gene, proj_dim, proj_dim/2) 
 
     #compact_gene_feature = residual_block(residual_gene_feature, reg_gene, proj_dim, proj_dim/4)
     
-    projected_disease_feature = Dense(proj_dim,trainable=False, 
+    projected_disease_feature = Dense(proj_dim,trainable=True, 
                 kernel_regularizer=regularizers.l2(reg_disease),name='disease_projection',
                 activation='relu', kernel_initializer='he_normal')(disease_feature)             
     
-    residual_disease_feature = residual_block(projected_disease_feature, reg_disease, proj_dim, proj_dim/2)
+ #   residual_disease_feature = residual_block(projected_disease_feature, reg_disease, proj_dim, proj_dim/2)
     #compact_disease_feature = residual_block(residual_disease_feature,reg_disease, proj_dim, proj_dim/4)
-    score = dot([residual_gene_feature,residual_disease_feature], 1, name='inner_product')
-    # score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
+#    score = dot([residual_gene_feature,residual_disease_feature], 1, name='inner_product')
+    left_score = dot([projected_gene_feature, projected_disease_feature], 1, name='IMC_inner_product')
+    right_score = dot([gene_factor, disease_factor], 1, name='MF_inner_product')
+    score = Add()([left_score,right_score])
     # calculate score
     
     # prediction = Dense(1, activation='sigmoid', init='he_uniform', name='prediction')(score)
