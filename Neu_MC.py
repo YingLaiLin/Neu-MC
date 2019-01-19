@@ -6,9 +6,10 @@ from keras import layers
 import numpy as np
 import h5py
 from keras.models import Model
-from keras.layers import Embedding, Input, Dense, Activation, dot, Layer
+from keras.layers import Embedding, Input, Dense, Activation, dot, Layer, Lambda, Conv2D
 from keras.layers import Embedding, Input, Dense, merge, Reshape, Merge, Flatten, Dropout,BatchNormalization, Add, multiply
 from keras.optimizers import Adagrad, Adam, SGD, RMSprop
+from keras.utils.vis_utils import plot_model
 import argparse
 import scipy.io as sio
 from Dataset import Dataset
@@ -17,7 +18,7 @@ from time import time
 from evaluate import evaluate_model
 import pandas as pd
 import os
-import pygpu
+# import pygpu
 from keras.constraints import UnitNorm
 
 
@@ -73,6 +74,10 @@ def residual_block(x, reg, proj_dim, bottle_neck_dim):
             activation='relu', kernel_initializer='random_normal')(y)
     return layers.add([x, z])
 
+
+def self_interaction(x):
+    return K.batch_dot(x[0], x[1], axes=[1,2])
+
 def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # Input variables
     gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
@@ -108,26 +113,43 @@ def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     
 
     # projection of gene feature and disease feature
-    
-    
-    
     projected_gene_feature = Dense(proj_dim,trainable=True, 
                 kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection',
                 activation='relu', kernel_initializer='he_normal')(gene_feature)
-
+    projected_gene_feature = Reshape((1, proj_dim))(projected_gene_feature)
     #compact_gene_feature = residual_block(residual_gene_feature, reg_gene, proj_dim, proj_dim/4)
     
     projected_disease_feature = Dense(proj_dim,trainable=True, 
                 kernel_regularizer=regularizers.l2(reg_disease),name='disease_projection',
                 activation='relu', kernel_initializer='he_normal')(disease_feature)             
-    
+    projected_disease_feature = Reshape((1, proj_dim))(projected_disease_feature)
+    # gene self conv 
+    gene_transpose = Lambda(lambda x: K.permute_dimensions(x, (0,2,1)))(projected_gene_feature)
+    gene_self_interaction = Lambda(self_interaction, output_shape=(proj_dim, proj_dim))(
+        [projected_gene_feature, gene_transpose])
+    gene_self_interaction = Flatten()(gene_self_interaction)
+    gene_self_interaction = Reshape((proj_dim, proj_dim, 1))(gene_self_interaction)
+    gene_self_interaction = Conv2D(32, (3,3))(gene_self_interaction)
+    gene_self_interaction = BatchNormalization(axis=3)(gene_self_interaction)
+    gene_self_interaction = Activation('relu')(gene_self_interaction)
+    gene_self_interaction = Flatten()(gene_self_interaction)
+    # disease self conv 
+    disease_transpose = Lambda(lambda x: K.permute_dimensions(x, (0,2,1)))(projected_disease_feature)
+    disease_self_interaction = Lambda(self_interaction, output_shape=(proj_dim, proj_dim))(
+        [projected_disease_feature, disease_transpose])
+    disease_self_interaction = Flatten()(disease_self_interaction)
+    disease_self_interaction = Reshape((proj_dim, proj_dim, 1))(disease_self_interaction)
+    disease_self_interaction = Conv2D(32, (3,3))(disease_self_interaction)
+    disease_self_interaction = BatchNormalization(axis=3)(disease_self_interaction)
+    disease_self_interaction = Activation('relu')(disease_self_interaction)
+    disease_self_interaction = Flatten()(disease_self_interaction)
     #compact_disease_feature = residual_block(residual_disease_feature,reg_disease, proj_dim, proj_dim/4)
-    score = dot([projected_gene_feature,projected_disease_feature], 1, name='inner_product')
+    score = dot([gene_self_interaction,disease_self_interaction], 1, name='inner_product')
+    # score = dot([projected_gene_feature,projected_disease_feature], 1, name='inner_product')
     # score = dot([projected_gene_feature, projected_disease_feature], 1, name='inner_product')
     # calculate score
     
     # prediction = Dense(1, activation='sigmoid', init='he_uniform', name='prediction')(score)
-
 
     model = Model(inputs=[gene_input, disease_input], outputs=score)
     return model
@@ -212,15 +234,6 @@ def get_model(num_genes, num_diseases):
     # using gene feature matrix for initialization
     gene_feas = h5py.File('gene_features.mat', 'r')
     humannet_features = gene_feas['features'][:,:].T
-
-def get_model(num_genes, num_diseases):
-    # Input variables
-    gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
-    disease_input = Input(shape=(1,), dtype='int32', name='disease_input')
-
-    # using gene feature matrix for initialization
-    gene_feas = h5py.File('gene_features.mat', 'r')
-    humannet_features = gene_feas['features'][:,:].T
     gene_feature_size = humannet_features.shape
     assert gene_feature_size[0] + 1 == num_genes
 
@@ -248,7 +261,8 @@ def get_model(num_genes, num_diseases):
     
     
     project_disease = Dense(gene_feature_size[1],trainable=True, name='disease_gene_projection', activation='relu', kernel_initializer=init_weights)(disease_feature)
-    
+
+
     score = dot([gene_feature, project_disease], 1, name='inner_product')
     # calculate score
     # score = merge([gene_feature, project_disease], mode='mul', name='score')
@@ -288,7 +302,7 @@ def eval_NeuCF(model, topK):
     for user_ind in range(1, num_users):
         users = np.full(len(items), user_ind, dtype = 'int32')
         score_from_u = model.predict([users, np.array(items)], 
-                                batch_size=12332, verbose=0)
+                                batch_size=batch_size, verbose=0)
         score_matrix[user_ind,:] = np.reshape(np.array(score_from_u), -1)
 
     # delte row 0 and column 0
@@ -364,7 +378,7 @@ if __name__ == '__main__':
     if training_model.lower() == 'deepimc':
         model = get_deepimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
     else:
-        model = get_nimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease);
+        model = get_nimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
 
     # specify learner 
     if learner.lower() == "adagrad": 
@@ -389,13 +403,13 @@ if __name__ == '__main__':
     engine = matlab.engine.start_matlab()
     cur_path = os.getcwd()
     engine.cd(cur_path, nargout=0)
-    cdf, recall = eval_NeuCF(model, topK)
-    cdf_t, recall_t = cdf[0][topK-1], recall[0][topK-1]
+    cdf_t, recall_t = -1, -1
     print('Init: cdf = %.6f, recall = %.6f' % ( cdf_t, recall_t,))
     
     best_cdf, best_recall, best_iter = cdf_t,recall_t,-1
 
     # Training model
+    plot_model(model, to_file='model.png')
     model.summary()
     for epoch in xrange(1,num_epochs+1):
         t1 = time()
@@ -429,7 +443,7 @@ if __name__ == '__main__':
     for user_ind in range(1, num_users):
         users = np.full(len(items), user_ind, dtype = 'int32')
         score_from_u = model.predict([users, np.array(items)], 
-                                batch_size=100, verbose=0)
+                                batch_size=batch_size, verbose=0)
         score_matrix[user_ind,:] = np.reshape(np.array(score_from_u), -1)
 
     # delte row 0 and column 0
