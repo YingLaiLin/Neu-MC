@@ -56,8 +56,8 @@ def parse_args():
                         help='Show performance per X iterations')
     parser.add_argument('--out', type=int, default=1,
                         help='Whether to save the trained model.')
-    parser.add_argument('--model', nargs='?', default='nimc', 
-                        help='Specify the model to use: nimc, deepimc')
+    parser.add_argument('--model', nargs='?', default='metricimc', 
+                        help='Specify the model to use: nimc, deepimc, metricimc')
     parser.add_argument('--pretrain', nargs='?', default='',
                         help='Specify the pretrain model file for this model.')
     return parser.parse_args()
@@ -129,7 +129,7 @@ def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
         [projected_gene_feature, gene_transpose])
     gene_self_interaction = Flatten()(gene_self_interaction)
     gene_self_interaction = Reshape((proj_dim, proj_dim, 1))(gene_self_interaction)
-    gene_self_interaction = Conv2D(32, (3,3))(gene_self_interaction)
+    gene_self_interaction = Conv2D(32, (3,3), strides=(2,2), data_format='channels_last')(gene_self_interaction)
     gene_self_interaction = BatchNormalization(axis=3)(gene_self_interaction)
     gene_self_interaction = Activation('relu')(gene_self_interaction)
     gene_self_interaction = Flatten()(gene_self_interaction)
@@ -139,7 +139,7 @@ def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
         [projected_disease_feature, disease_transpose])
     disease_self_interaction = Flatten()(disease_self_interaction)
     disease_self_interaction = Reshape((proj_dim, proj_dim, 1))(disease_self_interaction)
-    disease_self_interaction = Conv2D(32, (3,3))(disease_self_interaction)
+    disease_self_interaction = Conv2D(32, (3,3), strides=(2,2), data_format='channels_last')(disease_self_interaction)
     disease_self_interaction = BatchNormalization(axis=3)(disease_self_interaction)
     disease_self_interaction = Activation('relu')(disease_self_interaction)
     disease_self_interaction = Flatten()(disease_self_interaction)
@@ -152,6 +152,56 @@ def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # prediction = Dense(1, activation='sigmoid', init='he_uniform', name='prediction')(score)
 
     model = Model(inputs=[gene_input, disease_input], outputs=score)
+    return model
+
+def get_metricimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
+    # Input variables
+    gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
+    disease_input = Input(shape=(1,), dtype='int32', name='disease_input')
+
+    # using gene feature matrix for initialization
+    gene_feas = h5py.File('gene_features.mat', 'r')
+    humannet_features = gene_feas['features'][:,:].T
+    gene_feature_size = humannet_features.shape
+    assert gene_feature_size[0] + 1 == num_genes
+
+    humannet_features = np.insert(humannet_features, 0, [0]*gene_feature_size[1], 0)
+    #humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False)
+    #humannet_embedding_layer.build((None,))
+    #humannet_embedding_layer.set_weights([humannet_features])
+    humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False, weights=[humannet_features])
+    # using disease feature matrix for initialization
+    feas = h5py.File('disease_features.mat','r')
+    omim_features = feas['col_features'][:,:].T
+    disease_feature_size = omim_features.shape
+    assert disease_feature_size[0] + 1 == num_diseases
+    
+    omim_features = np.insert(omim_features, 0, [0]*disease_feature_size[1], 0)
+    #omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False)
+    #omim_embedding_layer.build((None,))
+    #omim_embedding_layer.set_weights([omim_features])
+    omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False,weights=[omim_features])
+    # get specific features
+    gene_feature = Flatten()(humannet_embedding_layer(gene_input))
+    disease_feature = Flatten()(omim_embedding_layer(disease_input))
+    # disease_feature = K.transpose(disease_feature)
+    # projection matrix, using W * H' as initialization
+    
+
+    # projection of gene feature and disease feature
+    projected_gene_feature = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection',
+                activation='relu', kernel_initializer='he_normal')(gene_feature)
+    
+    projected_disease_feature = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l2(reg_disease),name='disease_projection',
+                activation='relu', kernel_initializer='he_normal')(disease_feature)   
+
+    
+
+    sim = Lambda(lambda x: K.sqrt(K.sum(K.square(x[0] - x[1]))), name='sim_calculation')([projected_gene_feature, projected_disease_feature])
+
+    model = Model(inputs=[gene_input, disease_input], outputs=sim)
     return model
 
 def get_deepimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
@@ -325,6 +375,12 @@ def label_dependent_loss(alpha):
                 (1-alpha) * K.sum((1 - y_true ) * K.square(y_pred))
     return label_dependent
 
+def label_dependent_metric_loss(alpha):
+    def label_dependent(y_true, y_pred):
+        return alpha * K.sum(y_true * K.square(y_pred)) + \
+                (1-alpha) * K.sum((1 - y_true ) * K.square(1 - y_pred))
+    return label_dependent
+
 def squared_loss(alpha):
     def label_dependent(y_true, y_pred):
         return K.sum(y_true * K.square(y_pred - y_true)) + \
@@ -371,14 +427,18 @@ if __name__ == '__main__':
     # model = get_model(num_users, num_items)
     #loss_func = squared_loss(alpha-alpha)
     loss_func = label_dependent_loss(alpha=alpha)
+    
     # loss_func = root_mean_squared_error
     
     
     # specify model
     if training_model.lower() == 'deepimc':
         model = get_deepimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
-    else:
+    elif training_model.lower() == 'nimc':
         model = get_nimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
+    else:
+        model = get_metricimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
+        loss_func = label_dependent_metric_loss(alpha=alpha)
 
     # specify learner 
     if learner.lower() == "adagrad": 
@@ -409,7 +469,7 @@ if __name__ == '__main__':
     best_cdf, best_recall, best_iter = cdf_t,recall_t,-1
 
     # Training model
-    plot_model(model, to_file='model.png')
+    plot_model(model, to_file='%s.png' % training_model.lower())
     model.summary()
     for epoch in xrange(1,num_epochs+1):
         t1 = time()
