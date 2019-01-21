@@ -56,8 +56,8 @@ def parse_args():
                         help='Show performance per X iterations')
     parser.add_argument('--out', type=int, default=1,
                         help='Whether to save the trained model.')
-    parser.add_argument('--model', nargs='?', default='metricimc', 
-                        help='Specify the model to use: nimc, deepimc, metricimc')
+    parser.add_argument('--model', nargs='?', default='mlimc', 
+                        help='Specify the model to use: nimc, deepimc, mlimc')
     parser.add_argument('--pretrain', nargs='?', default='',
                         help='Specify the pretrain model file for this model.')
     return parser.parse_args()
@@ -154,7 +154,7 @@ def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     model = Model(inputs=[gene_input, disease_input], outputs=score)
     return model
 
-def get_metricimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
+def get_mlimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # Input variables
     gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
     disease_input = Input(shape=(1,), dtype='int32', name='disease_input')
@@ -199,7 +199,7 @@ def get_metricimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease
 
     
 
-    sim = Lambda(lambda x: K.sqrt(K.sum(K.square(x[0] - x[1]))), name='sim_calculation')([projected_gene_feature, projected_disease_feature])
+    sim = Lambda(lambda x: K.sum(K.square(x[0] - x[1])), name='sim_calculation')([projected_gene_feature, projected_disease_feature])
 
     model = Model(inputs=[gene_input, disease_input], outputs=sim)
     return model
@@ -437,7 +437,7 @@ if __name__ == '__main__':
     elif training_model.lower() == 'nimc':
         model = get_nimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
     else:
-        model = get_metricimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
+        model = get_mlimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
         loss_func = label_dependent_metric_loss(alpha=alpha)
 
     # specify learner 
