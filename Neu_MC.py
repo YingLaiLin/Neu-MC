@@ -56,8 +56,8 @@ def parse_args():
                         help='Show performance per X iterations')
     parser.add_argument('--out', type=int, default=1,
                         help='Whether to save the trained model.')
-    parser.add_argument('--model', nargs='?', default='mlimc', 
-                        help='Specify the model to use: nimc, deepimc, mlimc')
+    parser.add_argument('--model', nargs='?', default='crossimc', 
+                        help='Specify the model to use: nimc, deepimc, mlimc, crossimc')
     parser.add_argument('--pretrain', nargs='?', default='',
                         help='Specify the pretrain model file for this model.')
     return parser.parse_args()
@@ -154,6 +154,77 @@ def get_nimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     model = Model(inputs=[gene_input, disease_input], outputs=score)
     return model
 
+
+def cross_block(x, y):
+    '''
+        x_(l+1) = x_0 * x^T_l * w_l + b_l + x_l
+        x : input feature
+        y : the l-th feature after cross feature layer
+    '''
+    y_shape = K.int_shape(y)
+    weight = K.random_normal_variable(shape=(y_shape[1], 1), mean=0, scale=0.01)
+    tmp = K.dot(x, weight)
+    x_shape = K.int_shape(x)
+    tmp = Lambda(lambda z: K.repeat_elements(z, x_shape[1], axis=1))(tmp)
+    # tmp = Lambda(lambda z: K.dot(K.permute_dimensions(z[0], (0, 2, 1)), z[1]))([y, weight])
+    return multiply([x, tmp])
+
+    
+
+def get_crossimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
+    # Input variables
+    gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
+    disease_input = Input(shape=(1,), dtype='int32', name='disease_input')
+
+    # using gene feature matrix for initialization
+    gene_feas = h5py.File('gene_features.mat', 'r')
+    humannet_features = gene_feas['features'][:,:].T
+    gene_feature_size = humannet_features.shape
+    assert gene_feature_size[0] + 1 == num_genes
+
+    humannet_features = np.insert(humannet_features, 0, [0]*gene_feature_size[1], 0)
+    #humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False)
+    #humannet_embedding_layer.build((None,))
+    #humannet_embedding_layer.set_weights([humannet_features])
+    humannet_embedding_layer = Embedding(input_dim=gene_feature_size[0]+1, output_dim=gene_feature_size[1], trainable=False, weights=[humannet_features])
+    # using disease feature matrix for initialization
+    feas = h5py.File('disease_features.mat','r')
+    omim_features = feas['col_features'][:,:].T
+    disease_feature_size = omim_features.shape
+    assert disease_feature_size[0] + 1 == num_diseases
+    
+    omim_features = np.insert(omim_features, 0, [0]*disease_feature_size[1], 0)
+    #omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False)
+    #omim_embedding_layer.build((None,))
+    #omim_embedding_layer.set_weights([omim_features])
+    omim_embedding_layer = Embedding(input_dim=disease_feature_size[0]+1, output_dim=disease_feature_size[1],trainable=False,weights=[omim_features])
+    # get specific features
+    gene_feature = Flatten()(humannet_embedding_layer(gene_input))
+    disease_feature = Flatten()(omim_embedding_layer(disease_input))
+    # disease_feature = K.transpose(disease_feature)
+    # projection matrix, using W * H' as initialization
+    
+
+    # projection of gene feature and disease feature
+    projected_gene_feature = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l2(reg_gene), name='gene_projection',
+                activation='relu', kernel_initializer='he_normal')(gene_feature)
+    
+    projected_disease_feature = Dense(proj_dim,trainable=True, 
+                kernel_regularizer=regularizers.l2(reg_disease),name='disease_projection',
+                activation='relu', kernel_initializer='he_normal')(disease_feature)   
+
+    cross_gene = cross_block(projected_gene_feature, projected_gene_feature)
+    cross_disease = cross_block(projected_disease_feature, projected_disease_feature)
+    # sim = Lambda(lambda x: K.sum(K.square(x[0] - x[1])), name='sim_calculation')([projected_gene_feature, projected_disease_feature])
+    # scores = Lambda(lambda x: 1 - x)(sim)
+    
+    score = dot([cross_gene, cross_disease], 1, name='mlimc_inner_product')
+    model = Model(inputs=[gene_input, disease_input], outputs=[score])
+    return model
+
+
+
 def get_mlimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # Input variables
     gene_input = Input(shape=(1,), dtype='int32', name='gene_input')
@@ -197,12 +268,16 @@ def get_mlimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
                 kernel_regularizer=regularizers.l2(reg_disease),name='disease_projection',
                 activation='relu', kernel_initializer='he_normal')(disease_feature)   
 
+
+    # sim = Lambda(lambda x: K.sum(K.square(x[0] - x[1])), name='sim_calculation')([projected_gene_feature, projected_disease_feature])
+    # scores = Lambda(lambda x: 1 - x)(sim)
     
-
-    sim = Lambda(lambda x: K.sum(K.square(x[0] - x[1])), name='sim_calculation')([projected_gene_feature, projected_disease_feature])
-
-    model = Model(inputs=[gene_input, disease_input], outputs=sim)
+    sim = dot([projected_gene_feature, projected_disease_feature], 1, name='sim_calculation', normalize=True)
+    score = dot([projected_gene_feature, projected_disease_feature], 1, name='mlimc_inner_product')
+    model = Model(inputs=[gene_input, disease_input], outputs=[sim, score])
     return model
+
+
 
 def get_deepimc_model(num_genes, num_diseases, proj_dim, reg_gene, reg_disease):
     # Input variables
@@ -343,7 +418,7 @@ def get_train_instances(train, num_negatives):
      'label':labels})
     # df = df.sample(frac=1, random_state=501)
     return df['user'], df['item'], df['label']
-def eval_NeuCF(model, topK):
+def eval_NeuCF(model, topK, multi_out=False):
     print('start evaluating NeuCF...')
     print('constructing ScoreMatrix...')
     score_matrix = np.zeros((num_users, num_items), dtype='float')
@@ -351,7 +426,11 @@ def eval_NeuCF(model, topK):
     users = np.full(len(items), 1, dtype = 'int32')
     for user_ind in range(1, num_users):
         users = np.full(len(items), user_ind, dtype = 'int32')
-        score_from_u = model.predict([users, np.array(items)], 
+        if multi_out:
+            score_from_u = model.predict([users, np.array(items)], 
+                                batch_size=batch_size, verbose=0)[1]
+        else:
+            score_from_u = model.predict([users, np.array(items)], 
                                 batch_size=batch_size, verbose=0)
         score_matrix[user_ind,:] = np.reshape(np.array(score_from_u), -1)
 
@@ -436,9 +515,11 @@ if __name__ == '__main__':
         model = get_deepimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
     elif training_model.lower() == 'nimc':
         model = get_nimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
-    else:
+    elif training_model.lower() == 'mlimc':
         model = get_mlimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
         loss_func = label_dependent_metric_loss(alpha=alpha)
+    else:
+        model = get_crossimc_model(num_users, num_items, proj_dim, reg_gene, reg_disease)
 
     # specify learner 
     if learner.lower() == "adagrad": 
@@ -449,6 +530,7 @@ if __name__ == '__main__':
         model.compile(optimizer=Adam(lr=learning_rate,decay=decay), loss=loss_func)
     else:
         model.compile(optimizer=SGD(lr=learning_rate), loss=loss_func)
+
     # load pretrain model
     if model_pretrain != '':
         model.load_weights(model_pretrain,by_name=True)
@@ -477,16 +559,19 @@ if __name__ == '__main__':
         user_input, item_input, labels = get_train_instances(train, num_negatives)
         
         # Training
-        hist = model.fit([np.array(user_input), np.array(item_input)], #input
-                         np.array(labels), # labels 
-                         batch_size=batch_size, epochs=2, verbose=1, shuffle=True)
-
         
+        hist = model.fit([np.array(user_input), np.array(item_input)], #input
+                        [np.array(labels),np.array(labels)], # labels 
+                        batch_size=batch_size, epochs=1, verbose=1, shuffle=True)
+
         t2 = time()
        
         # Evaluation
         if epoch % verbose == 0:
-            cdf, recall = eval_NeuCF(model, topK)
+            if training_model.lower() == 'mlimc':
+                cdf, recall = eval_NeuCF(model, topK, True)
+            else:
+                cdf, recall = eval_NeuCF(model, topK)
             cdf_t, recall_t, loss = cdf[0][topK-1], recall[0][topK-1], hist.history['loss'][0]
             print('Iteration %d [%.1f s]: cdf = %.6f, recall = %.6f, loss = %.8f [%.1f s]' 
                   % (epoch,  t2-t1, cdf_t, recall_t, loss, time()-t2))
@@ -498,18 +583,10 @@ if __name__ == '__main__':
     engine.quit()
 
     # cal ScoreMatrix and save
-    score_matrix = np.zeros((num_users, num_items), dtype='float')
-    items = [i for i in range(num_items)]
-    for user_ind in range(1, num_users):
-        users = np.full(len(items), user_ind, dtype = 'int32')
-        score_from_u = model.predict([users, np.array(items)], 
-                                batch_size=batch_size, verbose=0)
-        score_matrix[user_ind,:] = np.reshape(np.array(score_from_u), -1)
-
-    # delte row 0 and column 0
-    score_matrix = np.delete(score_matrix,[0], axis=0)
-    score_matrix = np.delete(score_matrix,[0], axis=1)
-    sio.savemat('NeuCF_ScoreMatrix.mat',{'ScoreMatrix':score_matrix}) 
+    if training_model.lower() == 'mlimc':
+        eval_NeuCF(model, topK, True)
+    else:
+        eval_NeuCF(model, topK)
     
     print("End. Best Iteration %d:  CDF = %.4f, Recall = %.4f. " %(best_iter, best_cdf, best_recall))      
 
